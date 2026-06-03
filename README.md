@@ -1,71 +1,83 @@
-# Getting Started with Create React App
+# Development Data Lab
 
-This project was bootstrapped with [Create React App](https://github.com/facebook/create-react-app).
+Development Data Lab is an open-source learning dashboard for exploring public country development indicators. It helps learners inspect country profiles, indicator time series, source status, comparison views, and raw observations from public data APIs.
 
-## Available Scripts
+![Development Data Lab concept screenshot](docs/assets/development-data-lab-concept.png)
 
-In the project directory, you can run:
+## Features
 
-### `npm start`
+- Country dashboard with profile details, source-aware metrics, and a time-series chart.
+- Indicator explorer for World Bank development indicators.
+- East Africa comparison cards for Uganda, Kenya, Tanzania, and Rwanda.
+- Raw observation table with source IDs and links.
+- Source status page that separates live, optional, and inactive data sources.
+- Frontend-only mode by default, with an optional FastAPI backend for typed proxy and enrichment endpoints.
 
-Runs the app in the development mode.\
-Open [http://localhost:3000](http://localhost:3000) to view it in your browser.
+## Quick Start
 
-The page will reload when you make changes.\
-You may also see any lint errors in the console.
+```bash
+npm install
+npm run dev
+```
 
-### `npm test`
+Open http://localhost:5173.
 
-Launches the test runner in the interactive watch mode.\
-See the section about [running tests](https://facebook.github.io/create-react-app/docs/running-tests) for more information.
+The frontend works without a backend. It fetches World Bank indicators directly and uses a small bundled country catalog for reliable learner workflows.
 
-### `npm run build`
+## Optional Backend
 
-Builds the app for production to the `build` folder.\
-It correctly bundles React in production mode and optimizes the build for the best performance.
+The FastAPI backend adds typed endpoints for country metadata, World Bank indicators, source status, and optional WHO data.
 
-The build is minified and the filenames include the hashes.\
-Your app is ready to be deployed!
+```bash
+cd dashboard-backend
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+uvicorn main:app --reload
+```
 
-See the section about [deployment](https://facebook.github.io/create-react-app/docs/deployment) for more information.
+In another terminal:
 
-### `npm run eject`
+```bash
+cp .env.example .env
+npm run dev
+```
 
-**Note: this is a one-way operation. Once you `eject`, you can't go back!**
+The app will use `VITE_API_BASE_URL=http://localhost:8000` when the variable is set.
 
-If you aren't satisfied with the build tool and configuration choices, you can `eject` at any time. This command will remove the single build dependency from your project.
+## Data Sources
 
-Instead, it will copy all the configuration files and the transitive dependencies (webpack, Babel, ESLint, etc) right into your project so you have full control over them. All of the commands except `eject` will still work, but they will point to the copied scripts so you can tweak them. At this point you're on your own.
+- World Bank World Development Indicators: active primary source for the default indicators.
+- Bundled country catalog: local metadata used in frontend-only mode.
+- REST Countries: optional backend enrichment for country metadata.
+- WHO Global Health Observatory: optional backend endpoint for allowlisted health indicators.
+- UNESCO UIS: inactive until the endpoint is revalidated.
 
-You don't have to ever use `eject`. The curated feature set is suitable for small and middle deployments, and you shouldn't feel obligated to use this feature. However we understand that this tool wouldn't be useful if you couldn't customize it when you are ready for it.
+## Scripts
 
-## Learn More
+```bash
+npm run dev       # Start the Vite development server
+npm run build     # Type-check and build production assets
+npm run test      # Run frontend tests
+npm run preview   # Preview the production build
+```
 
-You can learn more in the [Create React App documentation](https://facebook.github.io/create-react-app/docs/getting-started).
+Backend checks:
 
-To learn React, check out the [React documentation](https://reactjs.org/).
+```bash
+cd dashboard-backend
+pytest
+```
 
-### Code Splitting
+## Repository Name
 
-This section has moved here: [https://facebook.github.io/create-react-app/docs/code-splitting](https://facebook.github.io/create-react-app/docs/code-splitting)
+The recommended repository slug is `development-data-lab`.
 
-### Analyzing the Bundle Size
+## Contributing
 
-This section has moved here: [https://facebook.github.io/create-react-app/docs/analyzing-the-bundle-size](https://facebook.github.io/create-react-app/docs/analyzing-the-bundle-size)
+Contributions are welcome. Start with `CONTRIBUTING.md`, keep data-source claims verifiable, and include tests for data adapter or API behavior changes.
 
-### Making a Progressive Web App
+## License
 
-This section has moved here: [https://facebook.github.io/create-react-app/docs/making-a-progressive-web-app](https://facebook.github.io/create-react-app/docs/making-a-progressive-web-app)
-
-### Advanced Configuration
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/advanced-configuration](https://facebook.github.io/create-react-app/docs/advanced-configuration)
-
-### Deployment
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/deployment](https://facebook.github.io/create-react-app/docs/deployment)
-
-### `npm run build` fails to minify
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify](https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify)
+MIT
 # Development-Dashboard

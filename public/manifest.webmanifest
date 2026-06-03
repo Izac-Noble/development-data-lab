@@ -1,0 +1,10 @@
+{
+  "short_name": "Data Lab",
+  "name": "Development Data Lab",
+  "description": "Explore country development indicators from public data sources.",
+  "icons": [],
+  "start_url": "/",
+  "display": "standalone",
+  "theme_color": "#0f7a4f",
+  "background_color": "#f7f8f5"
+}
