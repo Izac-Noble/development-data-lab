@@ -80,4 +80,3 @@ Contributions are welcome. Start with `CONTRIBUTING.md`, keep data-source claims
 ## License
 
 MIT
-# Development-Dashboard

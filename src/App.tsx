@@ -261,11 +261,11 @@ function TopBar() {
           <BookOpen size={17} />
           Docs
         </a>
-        <a href="https://github.com/Izac-Noble/capstone_development-dashboard#optional-backend" target="_blank" rel="noreferrer" aria-label="API documentation">
+        <a href="https://github.com/Izac-Noble/development-data-lab#optional-backend" target="_blank" rel="noreferrer" aria-label="API documentation">
           <Code2 size={17} />
           API
         </a>
-        <a href="https://github.com/Izac-Noble/capstone_development-dashboard" target="_blank" rel="noreferrer">
+        <a href="https://github.com/Izac-Noble/development-data-lab" target="_blank" rel="noreferrer">
           <Globe2 size={17} />
           GitHub
         </a>
