@@ -1,14 +1,38 @@
 import os
+import re
+import threading
+import time
 from datetime import datetime, timezone
 from typing import Any
 
+from pathlib import Path
+
 import requests
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
+# Secrets live in dashboard-backend/.env (git-ignored), never in the frontend bundle.
+load_dotenv(Path(__file__).resolve().parent / ".env")
+
 APP_TITLE = "Development Data Lab API"
+REST_COUNTRIES_API_KEY = os.getenv("REST_COUNTRIES_API_KEY", "").strip()
+REST_COUNTRIES_FIELDS = (
+    "codes.alpha_3,names.common,names.official,capitals,subregion,population,area,"
+    "currencies,languages,flag.emoji,landlocked,borders"
+)
 DEFAULT_ALLOWED_ORIGINS = "http://localhost:5173,http://localhost:3000"
-REQUEST_TIMEOUT_SECONDS = 12
+REQUEST_TIMEOUT_SECONDS = 30  # World Bank can take 20+ seconds on a slow day.
+UPSTREAM_RETRY_DELAYS_SECONDS = (0.4, 1.2)
+RETRYABLE_STATUSES = {429, 502, 503, 504}
+UPSTREAM_CACHE_TTL_SECONDS = 60 * 60
+UPSTREAM_CACHE_MAX_ENTRIES = 512
+
+# One pooled session keeps TLS connections to upstream APIs alive between requests.
+HTTP_SESSION = requests.Session()
+_upstream_cache: dict[str, tuple[float, Any]] = {}
+_upstream_cache_lock = threading.Lock()
+COUNTRY_CODE_PATTERN = re.compile(r"[A-Za-z]{3}")
 
 WORLD_BANK_INDICATORS = {
     "SP.POP.TOTL": {
@@ -143,40 +167,71 @@ async def health_check():
 @app.get("/api/sources/status")
 async def source_status():
     return [
-        source_status_item("world-bank", "World Bank", "World Development Indicators", "success", "Live API"),
-        source_status_item("rest-countries", "REST Countries", "Country metadata enrichment", "partial", "Backend API"),
-        source_status_item("who", "WHO", "Global Health Observatory", "partial", "Backend API"),
-        source_status_item("unesco", "UNESCO UIS", "Education source under review", "inactive", "Needs revalidation"),
+        source_status_item("world-bank", "World Bank WDI", "Development indicators", "success", "Live API"),
+        source_status_item("world-bank-countries", "World Bank countries", "Region, income group, capital", "success", "Live API"),
+        source_status_item(
+            "rest-countries",
+            "REST Countries",
+            "Languages, currency, area, borders (v5, API key)",
+            "success" if REST_COUNTRIES_API_KEY else "inactive",
+            "Backend API" if REST_COUNTRIES_API_KEY else "Set REST_COUNTRIES_API_KEY",
+        ),
+        source_status_item("who", "WHO GHO", "Health indicators (proxied: WHO blocks browser requests)", "success", "Backend API"),
     ]
 
 
 @app.get("/api/countries/{country_code}")
-async def country(country_code: str):
-    code = country_code.upper()
-    url = f"https://restcountries.com/v3.1/alpha/{code}"
+def country(country_code: str):
+    """Bundled profile, overlaid with live World Bank classification and, when an API key is
+    configured, REST Countries v5 facts (languages, currency, area, population, borders)."""
+    code = validate_country_code(country_code)
+    profile = dict(fallback_country(code))
+    sources = ["bundled"] if code in COUNTRY_FALLBACKS else []
 
     try:
-        payload = fetch_json(url)
-        if isinstance(payload, list) and payload:
-            return normalize_country(code, payload[0])
-    except requests.RequestException:
-        if code in COUNTRY_FALLBACKS:
-            return COUNTRY_FALLBACKS[code]
+        payload = fetch_json(f"https://api.worldbank.org/v2/country/{code}?format=json")
+        rows = payload[1] if isinstance(payload, list) and len(payload) > 1 and isinstance(payload[1], list) else []
+        if rows:
+            profile = normalize_country(code, rows[0])
+            sources.append("world-bank")
+    except HTTPException:
+        pass  # Keep the bundled profile.
 
-    if code in COUNTRY_FALLBACKS:
-        return COUNTRY_FALLBACKS[code]
+    rest_status = "not-configured"
+    if REST_COUNTRIES_API_KEY:
+        try:
+            payload = fetch_json(
+                f"https://api.restcountries.com/countries/v5/codes.alpha_3/{code}"
+                f"?response_fields={REST_COUNTRIES_FIELDS}",
+                headers={"Authorization": f"Bearer {REST_COUNTRIES_API_KEY}"},
+            )
+            objects = ((payload or {}).get("data") or {}).get("objects") or []
+            # Only trust a record for the requested country (the demo key, for one, returns a
+            # fixed sample country regardless of the query).
+            objects = [o for o in objects if ((o.get("codes") or {}).get("alpha_3") or "").upper() == code]
+            if objects:
+                profile = overlay_rest_countries(profile, objects[0])
+                sources.append("rest-countries")
+                rest_status = "success"
+            else:
+                rest_status = "no-data"
+        except HTTPException:
+            rest_status = "error"
 
-    raise HTTPException(status_code=404, detail="Country metadata is not available")
+    if not sources:
+        raise HTTPException(status_code=404, detail="Country metadata is not available")
+
+    return {**profile, "metadataSources": sources, "restCountriesStatus": rest_status}
 
 
 @app.get("/api/world-bank/{country_code}/{indicator_id}")
-async def world_bank(
+def world_bank(
     country_code: str,
     indicator_id: str,
     start_year: int = Query(1960, ge=1960, le=2100),
     end_year: int = Query(default_factory=lambda: datetime.now(timezone.utc).year, ge=1960, le=2100),
 ):
-    code = country_code.upper()
+    code = validate_country_code(country_code)
     indicator = WORLD_BANK_INDICATORS.get(indicator_id)
     if not indicator:
         raise HTTPException(status_code=404, detail="Indicator is not allowlisted")
@@ -192,7 +247,7 @@ async def world_bank(
     observations = normalize_world_bank_rows(rows, indicator_id, indicator)
 
     return {
-        "country": COUNTRY_FALLBACKS.get(code, {"code": code, "name": code}),
+        "country": fallback_country(code),
         "indicator": {"id": indicator_id, **indicator},
         "observations": observations,
         "status": source_status_item(
@@ -206,48 +261,138 @@ async def world_bank(
 
 
 @app.get("/api/who/{country_code}/{indicator_id}")
-async def who(country_code: str, indicator_id: str):
-    code = country_code.upper()
+def who(country_code: str, indicator_id: str):
+    code = validate_country_code(country_code)
     indicator = WHO_INDICATORS.get(indicator_id)
     if not indicator:
         raise HTTPException(status_code=404, detail="WHO indicator is not allowlisted")
 
-    url = f"https://ghoapi.azureedge.net/api/{indicator_id}?$filter=SpatialDim eq '{code}'"
+    # Without the Dim1 filter WHO returns male, female and both-sexes rows for every year.
+    url = (
+        f"https://ghoapi.azureedge.net/api/{indicator_id}"
+        f"?$filter=SpatialDim eq '{code}' and Dim1 eq 'SEX_BTSX'"
+    )
     payload = fetch_json(url)
     rows = payload.get("value", []) if isinstance(payload, dict) else []
 
     return {
-        "country": COUNTRY_FALLBACKS.get(code, {"code": code, "name": code}),
+        "country": fallback_country(code),
         "indicator": {"id": indicator_id, **indicator},
         "observations": normalize_who_rows(rows, indicator_id, indicator),
         "status": source_status_item("who", "WHO", f"GHO ({indicator_id})", "success", "Live API"),
     }
 
 
-def fetch_json(url: str) -> Any:
-    response = requests.get(url, timeout=REQUEST_TIMEOUT_SECONDS)
-    response.raise_for_status()
-    return response.json()
+def validate_country_code(country_code: str) -> str:
+    """Require an ISO 3166-1 alpha-3 code before it is placed into any upstream URL or filter."""
+    if not COUNTRY_CODE_PATTERN.fullmatch(country_code):
+        raise HTTPException(status_code=422, detail="country_code must be a 3-letter ISO code")
+    return country_code.upper()
+
+
+def fetch_json(url: str, headers: dict[str, str] | None = None) -> Any:
+    """Fetch upstream JSON with a short TTL cache.
+
+    Network, HTTP, or decode failures become a 502 for the client and are never cached.
+    """
+    now = time.monotonic()
+    with _upstream_cache_lock:
+        hit = _upstream_cache.get(url)
+        if hit and now - hit[0] < UPSTREAM_CACHE_TTL_SECONDS:
+            return hit[1]
+
+    extra = {"headers": headers} if headers else {}
+    for attempt, delay in enumerate((*UPSTREAM_RETRY_DELAYS_SECONDS, None)):
+        try:
+            response = HTTP_SESSION.get(url, timeout=REQUEST_TIMEOUT_SECONDS, **extra)
+            if response.status_code in RETRYABLE_STATUSES and delay is not None:
+                time.sleep(delay)  # Temporary upstream failure (World Bank returns intermittent 502s).
+                continue
+            response.raise_for_status()
+            payload = response.json()
+            break
+        except requests.HTTPError as error:
+            raise HTTPException(status_code=502, detail="Upstream data source is unavailable") from error
+        except (requests.RequestException, ValueError) as error:
+            # Retry quick failures (dropped connections); a timeout already cost 30s, so fail fast.
+            if delay is None or isinstance(error, (ValueError, requests.Timeout)):
+                raise HTTPException(status_code=502, detail="Upstream data source is unavailable") from error
+            time.sleep(delay)
+
+    with _upstream_cache_lock:
+        if len(_upstream_cache) >= UPSTREAM_CACHE_MAX_ENTRIES:
+            _upstream_cache.pop(next(iter(_upstream_cache)))  # Drop the oldest entry.
+        _upstream_cache[url] = (now, payload)
+    return payload
+
+
+def fallback_country(code: str) -> dict[str, Any]:
+    if code in COUNTRY_FALLBACKS:
+        return COUNTRY_FALLBACKS[code]
+    return {
+        "code": code,
+        "name": code,
+        "officialName": code,
+        "flag": "",
+        "region": "Unknown",
+        "incomeGroup": "Unknown",
+        "capital": "Unknown",
+        "currency": "Unknown",
+        "latitude": 0,
+        "longitude": 0,
+    }
+
+
+def overlay_rest_countries(profile: dict[str, Any], record: dict[str, Any]) -> dict[str, Any]:
+    """Map a REST Countries v5 record onto the app's profile shape."""
+    merged = dict(profile)
+    names = record.get("names") or {}
+    if names.get("common") and merged.get("name") == merged.get("code"):
+        merged["name"] = names["common"]
+    if names.get("official"):
+        merged["officialName"] = names["official"]
+    capitals = record.get("capitals") or []
+    primary = next((c for c in capitals if (c.get("attributes") or {}).get("primary")), capitals[0] if capitals else None)
+    if primary and primary.get("name"):
+        merged["capital"] = primary["name"]
+    currencies = record.get("currencies") or []
+    if currencies:
+        merged["currency"] = ", ".join(c["name"] for c in currencies if c.get("name"))
+    languages = [lang["name"] for lang in record.get("languages") or [] if lang.get("name")]
+    if languages:
+        merged["languages"] = languages
+    if (record.get("flag") or {}).get("emoji") and not merged.get("flag"):
+        merged["flag"] = record["flag"]["emoji"]
+    if record.get("subregion"):
+        merged["subregion"] = record["subregion"]
+    if isinstance(record.get("population"), (int, float)):
+        merged["population"] = record["population"]
+    if isinstance((record.get("area") or {}).get("kilometers"), (int, float)):
+        merged["areaKm2"] = record["area"]["kilometers"]
+    if isinstance(record.get("landlocked"), bool):
+        merged["landlocked"] = record["landlocked"]
+    if isinstance(record.get("borders"), list):
+        merged["borders"] = record["borders"]
+    return merged
 
 
 def normalize_country(code: str, payload: dict[str, Any]) -> dict[str, Any]:
-    currencies = payload.get("currencies") or {}
-    currency = next(iter(currencies.values()), {}).get("name", "Unknown")
-    latlng = payload.get("latlng") or [0, 0]
-    flag = payload.get("flag") or COUNTRY_FALLBACKS.get(code, {}).get("flag", "")
-
-    return {
-        "code": code,
-        "name": payload.get("name", {}).get("common", code),
-        "officialName": payload.get("name", {}).get("official", code),
-        "flag": flag,
-        "region": payload.get("subregion") or payload.get("region") or "Unknown",
-        "incomeGroup": COUNTRY_FALLBACKS.get(code, {}).get("incomeGroup", "Unknown"),
-        "capital": (payload.get("capital") or ["Unknown"])[0],
-        "currency": currency,
-        "latitude": float(latlng[0]) if len(latlng) > 0 else 0,
-        "longitude": float(latlng[1]) if len(latlng) > 1 else 0,
-    }
+    """Overlay live World Bank fields on the bundled (or placeholder) profile."""
+    profile = dict(fallback_country(code))
+    name = (payload.get("name") or "").strip()
+    region = ((payload.get("region") or {}).get("value") or "").strip()
+    income = ((payload.get("incomeLevel") or {}).get("value") or "").strip()
+    capital = (payload.get("capitalCity") or "").strip()
+    if name and profile["name"] == code:
+        profile["name"] = name
+        profile["officialName"] = name
+    if region:
+        profile["region"] = region
+    if income:
+        profile["incomeGroup"] = income
+    if capital:
+        profile["capital"] = capital
+    return profile
 
 
 def normalize_world_bank_rows(
