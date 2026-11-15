@@ -11,8 +11,16 @@ export function formatNumber(value: number | undefined, unit?: string): string {
     return `$${compactNumber(value)}`;
   }
 
-  if (unit === '% gross') {
+  if (unit === '% gross' || unit === '%') {
     return `${value.toFixed(1)}%`;
+  }
+
+  if (unit === '% of GDP') {
+    return `${value.toFixed(1)}% of GDP`;
+  }
+
+  if (unit === 'tonnes') {
+    return `${value.toFixed(2)} t`;
   }
 
   if (unit === 'years') {
@@ -25,7 +33,8 @@ export function formatNumber(value: number | undefined, unit?: string): string {
 export function compactNumber(value: number): string {
   return new Intl.NumberFormat('en', {
     notation: 'compact',
-    maximumFractionDigits: value >= 1000 ? 2 : 0,
+    // Large values compact to "1.34M"; small ones (rates, years) keep one decimal.
+    maximumFractionDigits: Math.abs(value) >= 1000 ? 2 : 1,
   }).format(value);
 }
 

@@ -1,131 +1,45 @@
 import type { CountryProfile } from '../types';
+import { COUNTRY_CATALOG } from './countries.generated';
 
-export const COUNTRIES: CountryProfile[] = [
-  {
-    code: 'UGA',
-    name: 'Uganda',
-    officialName: 'Republic of Uganda',
-    flag: '🇺🇬',
-    region: 'Sub-Saharan Africa',
-    incomeGroup: 'Low income',
-    capital: 'Kampala',
-    currency: 'Ugandan shilling',
-    latitude: 1.3733,
-    longitude: 32.2903,
-  },
-  {
-    code: 'KEN',
-    name: 'Kenya',
-    officialName: 'Republic of Kenya',
-    flag: '🇰🇪',
-    region: 'Sub-Saharan Africa',
-    incomeGroup: 'Lower middle income',
-    capital: 'Nairobi',
-    currency: 'Kenyan shilling',
-    latitude: -0.0236,
-    longitude: 37.9062,
-  },
-  {
-    code: 'TZA',
-    name: 'Tanzania',
-    officialName: 'United Republic of Tanzania',
-    flag: '🇹🇿',
-    region: 'Sub-Saharan Africa',
-    incomeGroup: 'Lower middle income',
-    capital: 'Dodoma',
-    currency: 'Tanzanian shilling',
-    latitude: -6.369,
-    longitude: 34.8888,
-  },
-  {
-    code: 'RWA',
-    name: 'Rwanda',
-    officialName: 'Republic of Rwanda',
-    flag: '🇷🇼',
-    region: 'Sub-Saharan Africa',
-    incomeGroup: 'Low income',
-    capital: 'Kigali',
-    currency: 'Rwandan franc',
-    latitude: -1.9403,
-    longitude: 29.8739,
-  },
-  {
-    code: 'ETH',
-    name: 'Ethiopia',
-    officialName: 'Federal Democratic Republic of Ethiopia',
-    flag: '🇪🇹',
-    region: 'Sub-Saharan Africa',
-    incomeGroup: 'Low income',
-    capital: 'Addis Ababa',
-    currency: 'Ethiopian birr',
-    latitude: 9.145,
-    longitude: 40.4897,
-  },
-  {
-    code: 'GHA',
-    name: 'Ghana',
-    officialName: 'Republic of Ghana',
-    flag: '🇬🇭',
-    region: 'Sub-Saharan Africa',
-    incomeGroup: 'Lower middle income',
-    capital: 'Accra',
-    currency: 'Ghanaian cedi',
-    latitude: 7.9465,
-    longitude: -1.0232,
-  },
-  {
-    code: 'NGA',
-    name: 'Nigeria',
-    officialName: 'Federal Republic of Nigeria',
-    flag: '🇳🇬',
-    region: 'Sub-Saharan Africa',
-    incomeGroup: 'Lower middle income',
-    capital: 'Abuja',
-    currency: 'Nigerian naira',
-    latitude: 9.082,
-    longitude: 8.6753,
-  },
-  {
-    code: 'USA',
-    name: 'United States',
-    officialName: 'United States of America',
-    flag: '🇺🇸',
-    region: 'North America',
-    incomeGroup: 'High income',
-    capital: 'Washington, DC',
-    currency: 'United States dollar',
-    latitude: 37.0902,
-    longitude: -95.7129,
-  },
-  {
-    code: 'GBR',
-    name: 'United Kingdom',
-    officialName: 'United Kingdom of Great Britain and Northern Ireland',
-    flag: '🇬🇧',
-    region: 'Europe and Central Asia',
-    incomeGroup: 'High income',
-    capital: 'London',
-    currency: 'Pound sterling',
-    latitude: 55.3781,
-    longitude: -3.436,
-  },
-  {
-    code: 'IND',
-    name: 'India',
-    officialName: 'Republic of India',
-    flag: '🇮🇳',
-    region: 'South Asia',
-    incomeGroup: 'Lower middle income',
-    capital: 'New Delhi',
-    currency: 'Indian rupee',
-    latitude: 20.5937,
-    longitude: 78.9629,
-  },
-];
+/** Every World Bank economy with a REST Countries record (215). Regenerate with `npm run generate:countries`. */
+export const COUNTRIES: CountryProfile[] = COUNTRY_CATALOG;
+
+/** Catalog grouped by World Bank region, for the country selector. */
+export const COUNTRIES_BY_REGION: Array<{ region: string; countries: CountryProfile[] }> = Object.entries(
+  COUNTRIES.reduce<Record<string, CountryProfile[]>>((groups, country) => {
+    (groups[country.region] ??= []).push(country);
+    return groups;
+  }, {}),
+)
+  .map(([region, countries]) => ({ region, countries }))
+  .sort((a, b) => a.region.localeCompare(b.region));
+
+const BY_CODE = new Map(COUNTRIES.map((country) => [country.code, country]));
 
 export const DEFAULT_COUNTRY = 'UGA';
 export const DEFAULT_COMPARE_COUNTRIES = ['UGA', 'KEN', 'TZA', 'RWA'];
 
+export function findCountryProfile(code: string): CountryProfile | undefined {
+  return BY_CODE.get(code.toUpperCase());
+}
+
+/** Bundled profile for `code`, or a clearly-labelled placeholder (never another country). */
 export function getCountryProfile(code: string): CountryProfile {
-  return COUNTRIES.find((country) => country.code === code) ?? COUNTRIES[0];
+  return findCountryProfile(code) ?? unknownCountryProfile(code);
+}
+
+function unknownCountryProfile(code: string): CountryProfile {
+  const normalized = code.toUpperCase();
+  return {
+    code: normalized,
+    name: normalized,
+    officialName: normalized,
+    flag: '',
+    region: 'Unknown',
+    incomeGroup: 'Unknown',
+    capital: 'Unknown',
+    currency: 'Unknown',
+    latitude: 0,
+    longitude: 0,
+  };
 }

@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useState } from 'react';
+import { lazy, Suspense, useEffect, useMemo, useState } from 'react';
 import {
   Activity,
   ArrowRight,
   BookOpen,
-  CheckCircle2,
   ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   CircleAlert,
   Code2,
   Database,
@@ -18,18 +19,23 @@ import {
   Search,
   TableProperties,
 } from 'lucide-react';
+import { CountryCard } from './components/CountryCard';
+import { WorldMap } from './components/WorldMap';
 import {
-  CartesianGrid,
-  Line,
-  LineChart,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-} from 'recharts';
-import { COUNTRIES, DEFAULT_COMPARE_COUNTRIES, DEFAULT_COUNTRY } from './data/countries';
-import { DEFAULT_INDICATOR, INDICATORS } from './data/indicators';
-import { fetchIndicatorSeries, fetchSourceStatuses } from './services/api';
+  COUNTRIES,
+  COUNTRIES_BY_REGION,
+  DEFAULT_COMPARE_COUNTRIES,
+  DEFAULT_COUNTRY,
+  getCountryProfile,
+} from './data/countries';
+import { availableIndicators, DEFAULT_INDICATOR, PROVIDER_LABELS } from './data/indicators';
+import {
+  fetchIndicatorSeries,
+  fetchIndicatorSeriesBatch,
+  fetchCountryMetadata,
+  invalidateSeries,
+} from './services/api';
+import { useSourceStatuses } from './services/sourceStatus';
 import { compactNumber, formatNumber, formatYearRange, fullNumber } from './services/format';
 import type { CountryProfile, IndicatorObservation, IndicatorSeries, SourceStatus } from './types';
 
@@ -44,19 +50,33 @@ const routes: Array<{ path: RoutePath; label: string; icon: typeof Database }> =
 ];
 
 const currentYear = new Date().getFullYear();
+const MIN_YEAR = 1960;
+const COMPARISON_COLORS = ['#0f7a4f', '#2563eb', '#8b5cf6', '#d97706'];
+
+const TrendChart = lazy(() => import('./components/Charts').then((module) => ({ default: module.TrendChart })));
+const Sparkline = lazy(() => import('./components/Charts').then((module) => ({ default: module.Sparkline })));
+const SPINNER_DELAY_MS = 150;
+const OBSERVATION_PAGE_SIZE = 10;
+const HAS_BACKEND = Boolean(import.meta.env.VITE_API_BASE_URL);
+const INDICATOR_OPTIONS = availableIndicators(HAS_BACKEND);
+const INDICATOR_GROUPS = Object.entries(PROVIDER_LABELS)
+  .map(([provider, label]) => ({ label, indicators: INDICATOR_OPTIONS.filter((item) => item.provider === provider) }))
+  .filter((group) => group.indicators.length > 0);
 
 function App() {
   const [route, setRoute] = useState<RoutePath>(getRoute());
   const [selectedCountry, setSelectedCountry] = useState(DEFAULT_COUNTRY);
   const [selectedIndicator, setSelectedIndicator] = useState(DEFAULT_INDICATOR);
-  const [startYear, setStartYear] = useState(1960);
-  const [endYear, setEndYear] = useState(Math.min(2023, currentYear));
+  const [startYear, setStartYear] = useState(MIN_YEAR);
+  const [endYear, setEndYear] = useState(currentYear);
   const [series, setSeries] = useState<IndicatorSeries | null>(null);
   const [compareSeries, setCompareSeries] = useState<IndicatorSeries[]>([]);
-  const [sourceStatuses, setSourceStatuses] = useState<SourceStatus[]>([]);
+  const sourceStatuses = useSourceStatuses();
+  const [liveProfiles, setLiveProfiles] = useState<Record<string, Partial<CountryProfile>>>({});
   const [loading, setLoading] = useState(true);
   const [compareLoading, setCompareLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [refreshKey, setRefreshKey] = useState(0);
 
   useEffect(() => {
     const handlePopState = () => setRoute(getRoute());
@@ -64,10 +84,41 @@ function App() {
     return () => window.removeEventListener('popstate', handlePopState);
   }, []);
 
+  // The comparison batch runs first so the main series (usually one of the comparison
+  // countries) is served from the same single World Bank request.
   useEffect(() => {
     let isMounted = true;
-    setLoading(true);
+    const showSpinner = window.setTimeout(() => isMounted && setCompareLoading(true), SPINNER_DELAY_MS);
+
+    fetchIndicatorSeriesBatch(DEFAULT_COMPARE_COUNTRIES, selectedIndicator, startYear, endYear)
+      .then((results) => {
+        if (isMounted) {
+          setCompareSeries(results);
+        }
+      })
+      .catch(() => {
+        if (isMounted) {
+          setCompareSeries([]);
+        }
+      })
+      .finally(() => {
+        window.clearTimeout(showSpinner);
+        if (isMounted) {
+          setCompareLoading(false);
+        }
+      });
+
+    return () => {
+      isMounted = false;
+      window.clearTimeout(showSpinner);
+    };
+  }, [selectedIndicator, startYear, endYear]);
+
+  useEffect(() => {
+    let isMounted = true;
     setError(null);
+    // Cached data resolves almost instantly; only show a spinner if the network is involved.
+    const showSpinner = window.setTimeout(() => isMounted && setLoading(true), SPINNER_DELAY_MS);
 
     fetchIndicatorSeries(selectedCountry, selectedIndicator, startYear, endYear)
       .then((nextSeries) => {
@@ -82,6 +133,7 @@ function App() {
         }
       })
       .finally(() => {
+        window.clearTimeout(showSpinner);
         if (isMounted) {
           setLoading(false);
         }
@@ -89,42 +141,23 @@ function App() {
 
     return () => {
       isMounted = false;
+      window.clearTimeout(showSpinner);
     };
-  }, [selectedCountry, selectedIndicator, startYear, endYear]);
+  }, [selectedCountry, selectedIndicator, startYear, endYear, refreshKey]);
 
+  // Live details (World Bank classification, plus REST Countries facts via the backend) for the
+  // selected country only; the bundled catalog shows until they arrive.
   useEffect(() => {
     let isMounted = true;
-    setCompareLoading(true);
-
-    Promise.all(
-      DEFAULT_COMPARE_COUNTRIES.map((countryCode) =>
-        fetchIndicatorSeries(countryCode, selectedIndicator, startYear, endYear),
-      ),
-    )
-      .then((results) => {
-        if (isMounted) {
-          setCompareSeries(results);
-        }
-      })
-      .catch(() => {
-        if (isMounted) {
-          setCompareSeries([]);
-        }
-      })
-      .finally(() => {
-        if (isMounted) {
-          setCompareLoading(false);
-        }
-      });
-
+    fetchCountryMetadata([selectedCountry]).then((profiles) => {
+      if (isMounted) {
+        setLiveProfiles((current) => ({ ...current, ...profiles }));
+      }
+    });
     return () => {
       isMounted = false;
     };
-  }, [selectedIndicator, startYear, endYear]);
-
-  useEffect(() => {
-    fetchSourceStatuses().then(setSourceStatuses).catch(() => setSourceStatuses([]));
-  }, []);
+  }, [selectedCountry]);
 
   const navigate = (path: RoutePath) => {
     window.history.pushState({}, '', path);
@@ -132,12 +165,10 @@ function App() {
   };
 
   const refreshData = () => {
+    invalidateSeries(selectedCountry, selectedIndicator);
     setSeries(null);
     setLoading(true);
-    fetchIndicatorSeries(selectedCountry, selectedIndicator, startYear, endYear)
-      .then(setSeries)
-      .catch((nextError: Error) => setError(nextError.message))
-      .finally(() => setLoading(false));
+    setRefreshKey((key) => key + 1);
   };
 
   return (
@@ -162,6 +193,7 @@ function App() {
             series={series}
             compareSeries={compareSeries}
             sourceStatuses={sourceStatuses}
+            liveProfiles={liveProfiles}
             loading={loading}
             compareLoading={compareLoading}
             error={error}
@@ -184,7 +216,13 @@ function App() {
           />
         )}
         {route === '/map' && (
-          <MapView selectedCountry={selectedCountry} onCountryChange={setSelectedCountry} />
+          <MapView
+            selectedCountry={selectedCountry}
+            onCountryChange={setSelectedCountry}
+            series={series}
+            liveProfiles={liveProfiles}
+            onOpenDashboard={() => navigate('/')}
+          />
         )}
         {route === '/sources' && <SourcesView sourceStatuses={sourceStatuses} />}
       </main>
@@ -242,7 +280,7 @@ function Sidebar({ activeRoute, onNavigate }: { activeRoute: RoutePath; onNaviga
         <p>
           {import.meta.env.VITE_API_BASE_URL
             ? 'Typed API endpoints are available.'
-            : 'World Bank data and bundled country metadata are active.'}
+            : 'World Bank, UNESCO and Our World in Data load directly in the browser.'}
         </p>
       </div>
     </aside>
@@ -305,10 +343,14 @@ function ControlBar({
       <label className="field">
         <span>Country</span>
         <select value={selectedCountry} onChange={(event) => onCountryChange(event.target.value)}>
-          {COUNTRIES.map((country) => (
-            <option key={country.code} value={country.code}>
-              {country.flag} {country.name} ({country.code})
-            </option>
+          {COUNTRIES_BY_REGION.map((group) => (
+            <optgroup key={group.region} label={group.region}>
+              {group.countries.map((country) => (
+                <option key={country.code} value={country.code}>
+                  {country.flag} {country.name}
+                </option>
+              ))}
+            </optgroup>
           ))}
         </select>
         <ChevronDown size={16} />
@@ -316,10 +358,14 @@ function ControlBar({
       <label className="field wide">
         <span>Indicator</span>
         <select value={selectedIndicator} onChange={(event) => onIndicatorChange(event.target.value)}>
-          {INDICATORS.map((indicator) => (
-            <option key={indicator.id} value={indicator.id}>
-              {indicator.name} · {indicator.id}
-            </option>
+          {INDICATOR_GROUPS.map((group) => (
+            <optgroup key={group.label} label={group.label}>
+              {group.indicators.map((indicator) => (
+                <option key={indicator.id} value={indicator.id}>
+                  {indicator.name}
+                </option>
+              ))}
+            </optgroup>
           ))}
         </select>
         <ChevronDown size={16} />
@@ -327,23 +373,11 @@ function ControlBar({
       <div className="range-fields">
         <label className="field small">
           <span>Start</span>
-          <input
-            type="number"
-            min="1960"
-            max={endYear}
-            value={startYear}
-            onChange={(event) => onStartYearChange(Number(event.target.value))}
-          />
+          <YearInput value={startYear} min={MIN_YEAR} max={endYear} onCommit={onStartYearChange} />
         </label>
         <label className="field small">
           <span>End</span>
-          <input
-            type="number"
-            min={startYear}
-            max={currentYear}
-            value={endYear}
-            onChange={(event) => onEndYearChange(Number(event.target.value))}
-          />
+          <YearInput value={endYear} min={startYear} max={currentYear} onCommit={onEndYearChange} />
         </label>
       </div>
       <button className="run-button" type="button" onClick={onRefresh} disabled={loading}>
@@ -354,10 +388,60 @@ function ControlBar({
   );
 }
 
+/**
+ * Year field that only reports a value once editing finishes (blur or Enter), so partial
+ * input like "20" never triggers a fetch. Out-of-range or non-numeric input is reverted.
+ */
+function YearInput({
+  value,
+  min,
+  max,
+  onCommit,
+}: {
+  value: number;
+  min: number;
+  max: number;
+  onCommit: (year: number) => void;
+}) {
+  const [draft, setDraft] = useState(String(value));
+
+  useEffect(() => {
+    setDraft(String(value));
+  }, [value]);
+
+  const commit = () => {
+    const year = Number(draft);
+    if (Number.isInteger(year) && year >= min && year <= max) {
+      if (year !== value) {
+        onCommit(year);
+      }
+    } else {
+      setDraft(String(value));
+    }
+  };
+
+  return (
+    <input
+      type="number"
+      min={min}
+      max={max}
+      value={draft}
+      onChange={(event) => setDraft(event.target.value)}
+      onBlur={commit}
+      onKeyDown={(event) => {
+        if (event.key === 'Enter') {
+          commit();
+        }
+      }}
+    />
+  );
+}
+
 function DashboardView({
   series,
   compareSeries,
   sourceStatuses,
+  liveProfiles,
   loading,
   compareLoading,
   error,
@@ -365,6 +449,7 @@ function DashboardView({
   series: IndicatorSeries | null;
   compareSeries: IndicatorSeries[];
   sourceStatuses: SourceStatus[];
+  liveProfiles: Record<string, Partial<CountryProfile>>;
   loading: boolean;
   compareLoading: boolean;
   error: string | null;
@@ -373,7 +458,7 @@ function DashboardView({
     <div className="view-stack">
       {error && <ErrorBanner message={error} />}
       <div className="dashboard-grid">
-        <CountryPanel series={series} loading={loading} />
+        <CountryPanel series={series} loading={loading} liveProfiles={liveProfiles} />
         <IndicatorPanel series={series} loading={loading} />
         <SourceTrace statuses={sourceStatuses} />
       </div>
@@ -383,9 +468,17 @@ function DashboardView({
   );
 }
 
-function CountryPanel({ series, loading }: { series: IndicatorSeries | null; loading: boolean }) {
+function CountryPanel({
+  series,
+  loading,
+  liveProfiles,
+}: {
+  series: IndicatorSeries | null;
+  loading: boolean;
+  liveProfiles: Record<string, Partial<CountryProfile>>;
+}) {
   const latest = series?.observations[0];
-  const country = series?.country;
+  const country = series ? { ...series.country, ...liveProfiles[series.country.code] } : undefined;
 
   return (
     <section className="panel country-panel">
@@ -419,13 +512,33 @@ function CountryPanel({ series, loading }: { series: IndicatorSeries | null; loa
               <dt>Latest value</dt>
               <dd>{formatNumber(latest?.value, series?.indicator.unit)}</dd>
             </div>
+            {country?.languages && (
+              <div>
+                <dt>Languages</dt>
+                <dd>{country.languages.slice(0, 3).join(', ')}</dd>
+              </div>
+            )}
+            {country?.areaKm2 !== undefined && (
+              <div>
+                <dt>Area</dt>
+                <dd>{fullNumber(country.areaKm2)} km²</dd>
+              </div>
+            )}
+            {country?.languages && (
+              <div>
+                <dt>Currency</dt>
+                <dd>{country.currency}</dd>
+              </div>
+            )}
+            {country?.borders && (
+              <div>
+                <dt>Borders</dt>
+                <dd>{country.landlocked ? 'Landlocked · ' : ''}{country.borders.length ? country.borders.join(', ') : 'None'}</dd>
+              </div>
+            )}
           </dl>
-          <div className="mini-map" aria-label={`${country?.name} location preview`}>
-            <div className="map-grid" />
-            <span
-              className="country-pin"
-              style={country ? mapPosition(country.latitude, country.longitude) : undefined}
-            />
+          <div className="mini-map">
+            {country && <WorldMap countries={COUNTRIES} selectedCountry={country.code} variant="focus" />}
           </div>
           <a className="text-link" href={series?.indicator.sourceUrl} target="_blank" rel="noreferrer">
             View source profile
@@ -440,7 +553,7 @@ function CountryPanel({ series, loading }: { series: IndicatorSeries | null; loa
 function IndicatorPanel({ series, loading }: { series: IndicatorSeries | null; loading: boolean }) {
   const chartData = useMemo(() => {
     return [...(series?.observations ?? [])]
-      .sort((a, b) => a.year - b.year)
+      .reverse()
       .map((observation) => ({
         year: observation.year,
         value: observation.value,
@@ -476,35 +589,17 @@ function IndicatorPanel({ series, loading }: { series: IndicatorSeries | null; l
           <div className="metric-line">
             <strong>{formatNumber(latest?.value, series?.indicator.unit)}</strong>
             <span>{latest ? latest.year : 'No year'}</span>
-            {delta !== undefined && <em>{delta >= 0 ? '+' : ''}{compactNumber(delta)} from previous year</em>}
+            {delta !== undefined && previous && (
+              <em>
+                {delta >= 0 ? '+' : ''}
+                {compactNumber(delta)} {latest && previous.year === latest.year - 1 ? 'from previous year' : `since ${previous.year}`}
+              </em>
+            )}
           </div>
           <div className="chart-frame">
-            <ResponsiveContainer width="100%" height={260}>
-              <LineChart data={chartData} margin={{ top: 10, right: 18, bottom: 0, left: 0 }}>
-                <CartesianGrid stroke="#dde5dc" vertical={false} />
-                <XAxis dataKey="year" tickLine={false} axisLine={false} stroke="#667085" />
-                <YAxis
-                  tickLine={false}
-                  axisLine={false}
-                  stroke="#667085"
-                  tickFormatter={(value) => compactNumber(Number(value))}
-                  width={56}
-                />
-                <Tooltip
-                  formatter={(value) => [formatNumber(Number(value), series?.indicator.unit), series?.indicator.shortName]}
-                  labelFormatter={(label) => `Year ${label}`}
-                  contentStyle={{ borderRadius: 8, border: '1px solid #d5ded7' }}
-                />
-                <Line
-                  type="monotone"
-                  dataKey="value"
-                  stroke="#0f7a4f"
-                  strokeWidth={3}
-                  dot={false}
-                  activeDot={{ r: 5 }}
-                />
-              </LineChart>
-            </ResponsiveContainer>
+            <Suspense fallback={<div className="chart-placeholder" style={{ height: 260 }} />}>
+              <TrendChart data={chartData} unit={series?.indicator.unit} label={series?.indicator.shortName} />
+            </Suspense>
           </div>
           <p className="source-note">
             Source: <a href={series?.indicator.sourceUrl}>{series?.indicator.source}</a>
@@ -516,7 +611,8 @@ function IndicatorPanel({ series, loading }: { series: IndicatorSeries | null; l
 }
 
 function SourceTrace({ statuses }: { statuses: SourceStatus[] }) {
-  const inactiveCount = statuses.filter((source) => source.fetchStatus === 'inactive' || source.fetchStatus === 'error').length;
+  const failed = statuses.filter((source) => source.fetchStatus === 'error');
+  const backendOnly = statuses.filter((source) => source.fetchStatus === 'inactive');
 
   return (
     <section className="panel source-trace">
@@ -540,12 +636,24 @@ function SourceTrace({ statuses }: { statuses: SourceStatus[] }) {
           </article>
         ))}
       </div>
-      {inactiveCount > 0 && (
+      {(failed.length > 0 || backendOnly.length > 0) && (
         <div className="notice">
           <CircleAlert size={17} />
           <div>
-            <strong>Some sources are optional or inactive.</strong>
-            <p>Core World Bank indicators remain available in frontend-only mode.</p>
+            {failed.length > 0 ? (
+              <>
+                <strong>{failed.map((source) => source.name).join(', ')} failed.</strong>
+                <p>Cached or bundled data is shown where available. Press Run to retry.</p>
+              </>
+            ) : (
+              <>
+                <strong>
+                  {backendOnly.map((source) => source.name).join(' and ')} {backendOnly.length > 1 ? 'need' : 'needs'} the
+                  backend.
+                </strong>
+                <p>They need an API key or block browser requests. All other sources work without it.</p>
+              </>
+            )}
           </div>
         </div>
       )}
@@ -586,28 +694,25 @@ function ComparisonStrip({ series, loading }: { series: IndicatorSeries[]; loadi
 
 function ComparisonCard({ series, index }: { series: IndicatorSeries; index: number }) {
   const latest = series.observations[0];
-  const data = [...series.observations]
-    .sort((a, b) => a.year - b.year)
-    .slice(-12)
+  // Observations are already sorted newest-first; take the latest 12 and flip to chronological.
+  const data = series.observations
+    .slice(0, 12)
+    .reverse()
     .map((observation) => ({ year: observation.year, value: observation.value }));
-  const colors = ['#0f7a4f', '#2563eb', '#8b5cf6', '#d97706'];
+  const color = COMPARISON_COLORS[index % COMPARISON_COLORS.length];
 
   return (
-    <article className="comparison-card" style={{ borderColor: colors[index % colors.length] }}>
+    <article className="comparison-card" style={{ borderColor: color }}>
       <div className="comparison-top">
         <strong>
-          <span className="dot" style={{ background: colors[index % colors.length] }} />
+          <span className="dot" style={{ background: color }} />
           {series.country.name}
         </strong>
         <span>{formatNumber(latest?.value, series.indicator.unit)}</span>
       </div>
-      <ResponsiveContainer width="100%" height={92}>
-        <LineChart data={data} margin={{ top: 8, right: 0, bottom: 0, left: 0 }}>
-          <Line type="monotone" dataKey="value" stroke={colors[index % colors.length]} strokeWidth={2} dot={false} />
-          <YAxis hide domain={['dataMin', 'dataMax']} />
-          <XAxis hide dataKey="year" />
-        </LineChart>
-      </ResponsiveContainer>
+      <Suspense fallback={<div className="chart-placeholder" style={{ height: 92 }} />}>
+        <Sparkline data={data} color={color} />
+      </Suspense>
     </article>
   );
 }
@@ -620,14 +725,25 @@ function ObservationTable({
   countryName: string;
 }) {
   const [query, setQuery] = useState('');
-  const visibleRows = observations.filter((observation) => String(observation.year).includes(query)).slice(0, 50);
+  const [page, setPage] = useState(0);
+  const matchingRows = useMemo(
+    () => observations.filter((observation) => String(observation.year).includes(query)),
+    [observations, query],
+  );
+  const pageCount = Math.max(1, Math.ceil(matchingRows.length / OBSERVATION_PAGE_SIZE));
+  const currentPage = Math.min(page, pageCount - 1);
+  const firstRow = currentPage * OBSERVATION_PAGE_SIZE;
+  const visibleRows = matchingRows.slice(firstRow, firstRow + OBSERVATION_PAGE_SIZE);
+
+  // New data or a new search starts again at the most recent years.
+  useEffect(() => setPage(0), [observations, query]);
 
   return (
     <section className="panel full-width">
       <div className="panel-heading">
         <div>
           <h3>Indicator observations {countryName ? `(${countryName})` : ''}</h3>
-          <p>Raw values used by the chart and comparison cards</p>
+          <p>Most recent years first, {OBSERVATION_PAGE_SIZE} per page</p>
         </div>
         <label className="table-search">
           <Search size={16} />
@@ -672,6 +788,35 @@ function ObservationTable({
               ))}
             </tbody>
           </table>
+          {pageCount > 1 && (
+            <div className="table-pager">
+              <span>
+                Showing {firstRow + 1}–{firstRow + visibleRows.length} of {matchingRows.length}
+              </span>
+              <div>
+                <button
+                  type="button"
+                  className="ghost-button"
+                  onClick={() => setPage(currentPage - 1)}
+                  disabled={currentPage === 0}
+                  aria-label="Newer years"
+                >
+                  <ChevronLeft size={15} />
+                  Newer
+                </button>
+                <button
+                  type="button"
+                  className="ghost-button"
+                  onClick={() => setPage(currentPage + 1)}
+                  disabled={currentPage >= pageCount - 1}
+                  aria-label="Older years"
+                >
+                  Older
+                  <ChevronRight size={15} />
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       )}
     </section>
@@ -702,14 +847,16 @@ function ExplorerView({
           </div>
         </div>
         <div className="indicator-grid">
-          {INDICATORS.map((indicator) => (
+          {INDICATOR_OPTIONS.map((indicator) => (
             <button
               key={indicator.id}
               type="button"
               className={indicator.id === selectedIndicator ? 'indicator-card selected' : 'indicator-card'}
               onClick={() => onIndicatorChange(indicator.id)}
             >
-              <span>{indicator.id}</span>
+              <span>
+                {PROVIDER_LABELS[indicator.provider]} · {indicator.id}
+              </span>
               <strong>{indicator.name}</strong>
               <p>{indicator.description}</p>
             </button>
@@ -773,34 +920,33 @@ function CompareView({
 function MapView({
   selectedCountry,
   onCountryChange,
+  series,
+  liveProfiles,
+  onOpenDashboard,
 }: {
   selectedCountry: string;
   onCountryChange: (countryCode: string) => void;
+  series: IndicatorSeries | null;
+  liveProfiles: Record<string, Partial<CountryProfile>>;
+  onOpenDashboard: () => void;
 }) {
+  const country = { ...getCountryProfile(selectedCountry), ...liveProfiles[selectedCountry] };
+  const currentSeries = series?.country.code === selectedCountry ? series : null;
+
   return (
     <div className="view-stack">
       <section className="panel full-width map-view">
         <div className="panel-heading">
           <div>
             <h3>Country map</h3>
-            <p>Select a country to update the dashboard controls.</p>
+            <p>Click any country (or dot, for small island states) to see its key stats.</p>
           </div>
         </div>
-        <div className="atlas">
-          <div className="atlas-grid" />
-          {COUNTRIES.map((country) => (
-            <button
-              key={country.code}
-              type="button"
-              className={country.code === selectedCountry ? 'atlas-pin active' : 'atlas-pin'}
-              style={mapPosition(country.latitude, country.longitude)}
-              onClick={() => onCountryChange(country.code)}
-              title={country.name}
-            >
-              <span>{country.flag}</span>
-              <strong>{country.code}</strong>
-            </button>
-          ))}
+        <div className="map-layout">
+          <div className="atlas">
+            <WorldMap countries={COUNTRIES} selectedCountry={selectedCountry} onCountryChange={onCountryChange} />
+          </div>
+          <CountryCard country={country} currentSeries={currentSeries} onOpenDashboard={onOpenDashboard} />
         </div>
       </section>
     </div>
@@ -848,7 +994,8 @@ function SourcesView({ sourceStatuses }: { sourceStatuses: SourceStatus[] }) {
 }
 
 function StatusPill({ status }: { status: SourceStatus['fetchStatus'] }) {
-  const labels = {
+  const labels: Record<SourceStatus['fetchStatus'], string> = {
+    idle: 'Ready',
     success: 'Success',
     partial: 'Partial',
     inactive: 'Inactive',
@@ -895,13 +1042,6 @@ function getRoute(): RoutePath {
     return path;
   }
   return '/';
-}
-
-function mapPosition(latitude: number, longitude: number): { left: string; top: string } {
-  return {
-    left: `${((longitude + 180) / 360) * 100}%`,
-    top: `${((90 - latitude) / 180) * 100}%`,
-  };
 }
 
 function downloadCsv(observations: IndicatorObservation[], fileName: string) {

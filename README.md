@@ -47,11 +47,27 @@ The app will use `VITE_API_BASE_URL=http://localhost:8000` when the variable is 
 
 ## Data Sources
 
-- World Bank World Development Indicators: active primary source for the default indicators.
-- Bundled country catalog: local metadata used in frontend-only mode.
-- REST Countries: optional backend enrichment for country metadata.
-- WHO Global Health Observatory: optional backend endpoint for allowlisted health indicators.
-- UNESCO UIS: inactive until the endpoint is revalidated.
+All sources except REST Countries are keyless. The Source trace panel shows the live result of each request.
+
+- World Bank World Development Indicators: population, GDP, health and education indicators (browser or backend).
+- World Bank country API: live region, income group and capital, layered over the bundled catalog.
+- UNESCO UIS data API: primary completion, out-of-school rate, youth literacy and education spending.
+- Our World in Data: long-run life expectancy, child mortality and CO2 emissions per capita.
+- WHO Global Health Observatory: backend only, because the WHO API does not allow browser (CORS) requests.
+- Bundled country catalog: instant fallback metadata.
+
+- REST Countries v5: languages, currency, area, population and borders. Needs a free API key, so it runs through the backend only (see below).
+
+### REST Countries API key
+
+REST Countries v1-v4 were shut down; v5 requires an API key. Keep the key on the backend: anything in a `VITE_*` variable is bundled into the public JavaScript.
+
+```bash
+cp dashboard-backend/.env.example dashboard-backend/.env
+# then set REST_COUNTRIES_API_KEY=... in dashboard-backend/.env
+```
+
+Run the backend and point the frontend at it (`VITE_API_BASE_URL=http://localhost:8000` in the root `.env`). The Source trace shows REST Countries as Success once the key works.
 
 ## Scripts
 
